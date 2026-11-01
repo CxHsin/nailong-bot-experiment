@@ -72,25 +72,36 @@ test("late vectors cannot roll a changed dimension back and reopening reuses the
 
 test("failed historical preparation recovers without a new query and closing cancels a held background request",{ timeout: 60_000 },async()=>{
   let offline=true;let holdBackground=false;
+  let releaseFailure!:()=>void;const failureHold=new Promise<void>(resolve=>{releaseFailure=resolve;});
+  let failureEntered!:()=>void;const failureReady=new Promise<void>(resolve=>{failureEntered=resolve;});
   let entered!:()=>void;const ready=new Promise<void>(resolve=>{entered=resolve;});
-  const remote=await embeddingFixture(()=>[],(wire,response)=>{
-    if(offline){response.writeHead(401);response.end("private-fixture");return;}
+  const remote=await embeddingFixture(()=>[],async(wire,response)=>{
+    if(offline){if(wire.input.length>1){failureEntered();await failureHold;}response.writeHead(401);response.end("private-fixture");return;}
     if(holdBackground&&wire.input.includes("后台取消")){entered();return;}
     response.writeHead(200,{"content-type":"application/json"});response.end(JSON.stringify({data:wire.input.map((_,index)=>({index,embedding:[1,0,0]}))}));
   });
-  const f=await assistantFixture((_wire,response)=>sendChatCompletion(response,"已接收"),async()=>({embedding:{env:{KEY:"fixture"},configs:[{id:"retry",displayName:"Retry",baseUrl:remote.baseUrl,model:"retry",apiKeyEnv:"KEY",timeoutMs:200}]}}));
+  const f=await assistantFixture((_wire,response)=>sendChatCompletion(response,"已接收"),async()=>({embedding:{env:{KEY:"fixture"},configs:[{id:"retry",displayName:"Retry",baseUrl:remote.baseUrl,model:"retry",apiKeyEnv:"KEY",timeoutMs:5000}]}}));
   try{
     await f.app.receive({conversationId:"one",inputId:"first",text:"现役历史"});await f.app.waitForIdle();
-    assert.equal((await f.app.controlSnapshot("one")).embedding.progress.status,"degraded");
+    await failureReady;
+    // Foreground idle does not wait for the held background preparation response.
+    assert.equal((await f.app.controlSnapshot("one")).embedding.progress.status,"preparing");
+    releaseFailure();
+    const failedBy=Date.now()+5000;
+    let failed=(await f.app.controlSnapshot("one")).embedding.progress;
+    while(failed.status!=="degraded"&&Date.now()<failedBy){await delay(10);failed=(await f.app.controlSnapshot("one")).embedding.progress;}
+    assert.equal(failed.status,"degraded");assert.ok(failed.failed>0);
+    const failedRequests=remote.requests.length;
     offline=false;
     // Polling the remote HTTP observation does not refresh/wake the service.
-    const end=Date.now()+4000;while(!remote.requests.some(wire=>wire.input.includes("现役历史")&&wire.input.length>1)&&Date.now()<end)await delay(25);
-    assert.ok(remote.requests.some(wire=>wire.input.includes("现役历史")&&wire.input.length>1),"background retry starts without a status refresh or new query");
+    const retried=()=>remote.requests.slice(failedRequests).some(wire=>wire.input.includes("现役历史")&&wire.input.length>1);
+    const end=Date.now()+4000;while(!retried()&&Date.now()<end)await delay(25);
+    assert.ok(retried(),"background retry starts without a status refresh or new query");
     const progress=await prepared(f,2);
     assert.equal(progress.completed,2);assert.equal(progress.learned,1);assert.equal(progress.status,"ready");
     holdBackground=true;
     await f.app.receive({conversationId:"one",inputId:"cancel",text:"后台取消"});await ready;
     const closing=Date.now();await f.app.close();assert.ok(Date.now()-closing<1000,"shutdown cancels remote preparation");
     const calls=remote.requests.length;await delay(300);assert.equal(remote.requests.length,calls,"closed worker never schedules another request");
-  }finally{await f.close();await remote.close();}
+  }finally{releaseFailure();await f.close();await remote.close();}
 });
