@@ -281,8 +281,16 @@ test("panel buttons navigate and change settings in one Telegram message without
     await click(f, "思考等级"); await click(f, "high"); assert.match(latestPanel(f).text, /当前：high/);
     await click(f, "返回首页");
     await click(f, "设置");
+    assert.match(latestPanel(f).text, /主动表达：自然活跃/);
+    await click(f, "热闹");
+    assert.match(latestPanel(f).text, /主动表达：热闹/);
+    assert.match(latestPanel(f).buttons.map(b => b.text).join(" "), /✓ 热闹/);
+    await click(f, "返回首页");
+    assert.match(latestPanel(f).text, /主动表达：热闹/);
+    await click(f, "设置");
     await click(f, /草稿预览/); assert.match(latestPanel(f).buttons.map(b => b.text).join(" "), /草稿预览：关/);
     await click(f, "返回首页");
+    assert.match(latestPanel(f).text, /草稿预览：关/);
     await click(f, "工作列表"); assert.match(latestPanel(f).text, /暂无工作/);
     await click(f, "返回首页");
     await click(f, "设置"); await click(f, "会话操作"); await click(f, "重置上下文…"); await click(f, "取消");
